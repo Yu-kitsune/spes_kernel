@@ -2394,7 +2394,13 @@ static int dwc3_gadget_run_stop(struct dwc3 *dwc, int is_on, int suspend)
 		dwc3_writel(dwc->regs, DWC3_GUSB2PHYCFG(0), reg);
 	}
 
-	if (!timeout)
+	if (!timeout){
+		dev_err(dwc->dev, "failed to %s controller\n",
+		is_on ? "start" : "stop");					
+		if (is_on)							
+		dbg_event(0xFF, "STARTTOUT", reg);										
+		else												
+		dbg_event(0xFF, "STOPTOUT", reg);															
 		return -ETIMEDOUT;
 	}
 

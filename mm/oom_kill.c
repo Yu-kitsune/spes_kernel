@@ -609,7 +609,7 @@ static int dump_task(struct task_struct *p, void *arg)
  * pgtables_bytes, swapents, oom_score_adj value, and name.
  */
 
-void dump_tasks(struct mem_cgroup *memcg, const nodemask_t *nodemask)
+void dump_tasks(struct oom_control *oc)
 
 {
 	pr_info("Tasks state (memory values in pages):\n");
@@ -906,9 +906,12 @@ static void mark_oom_victim(struct task_struct *tsk)
 	if (test_and_set_tsk_thread_flag(tsk, TIF_MEMDIE))
 		return;
 
-	/* oom_mm is bound to the signal struct life time. */
-	__mark_oom_victim(tsk);
-
+        /* oom_mm is bound to the signal struct life time. */
+	if (!cmpxchg(&tsk->signal->oom_mm, NULL, mm)) {
+		mmgrab(tsk->signal->oom_mm);
+		set_bit(MMF_OOM_VICTIM, &mm->flags);
+	}
+        
 	/*
 	 * Make sure that the task is woken up from uninterruptible sleep
 	 * if it is frozen because OOM killer wouldn't be able to free
