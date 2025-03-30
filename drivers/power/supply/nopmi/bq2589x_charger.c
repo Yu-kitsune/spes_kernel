@@ -130,33 +130,57 @@ static int bq2589x_set_fast_charge_mode(struct bq2589x *bq, int pd_active)
 	return rc;
 }
 
-static int bq2589x_read_byte(struct bq2589x *bq, u8 *data, u8 reg)
+static int __bq2589x_read_byte(struct bq2589x *bq, u8 reg, u8 *data)
 {
-	int ret;
-	int count = 3;
+	int ret, count = 3;
 
-	mutex_lock(&bq->i2c_rw_lock);
 	while (count--) {
 		ret = i2c_smbus_read_byte_data(bq->client, reg);
-		if (ret < 0) {
-			pr_err("%s: failed to read 0x%.2x\n", __func__, reg);
-		} else {
+		if (ret >= 0) {
 			*data = (u8)ret;
-			mutex_unlock(&bq->i2c_rw_lock);
 			return 0;
 		}
-		udelay(200);
+
+		pr_err("i2c read: failed to read 0x%.2x, retrying...\n", reg);
+		usleep_range(200, 300);
 	}
+
+	return ret;
+}
+
+static int __bq2589x_write_byte(struct bq2589x *bq, u8 reg, u8 data)
+{
+	int ret, count = 3;
+
+	while (count--) {
+		ret = i2c_smbus_write_byte_data(bq->client, reg, data);
+		if (ret >= 0)
+			return 0;
+
+		pr_err("i2c write: failed to write 0x%.2x to reg 0x%.2x: %d, retrying...\n", data, reg, ret);
+		usleep_range(200, 300);
+	}
+
+	return ret;
+}
+
+static int bq2589x_read_byte(struct bq2589x *bq, u8 reg, u8 *data)
+{
+	int ret;
+
+	mutex_lock(&bq->i2c_rw_lock);
+	ret = __bq2589x_read_byte(bq, reg, data);
 	mutex_unlock(&bq->i2c_rw_lock);
+
 	return ret;
 }
 
 static int bq2589x_write_byte(struct bq2589x *bq, u8 reg, u8 data)
 {
-	int ret = 0;
+	int ret;
 
 	mutex_lock(&bq->i2c_rw_lock);
-	ret = i2c_smbus_write_byte_data(bq->client, reg, data);
+	ret = __bq2589x_write_byte(bq, reg, data);
 	mutex_unlock(&bq->i2c_rw_lock);
 
 	return ret;
@@ -167,14 +191,24 @@ static int bq2589x_update_bits(struct bq2589x *bq, u8 reg, u8 mask, u8 data)
 	int ret;
 	u8 tmp;
 
-	ret = bq2589x_read_byte(bq, &tmp, reg);
-	if (ret)
-		return ret;
+	mutex_lock(&bq->i2c_rw_lock);
+
+	ret = __bq2589x_read_byte(bq, reg, &tmp);
+	if (ret) {
+		pr_err("%s: failed to read reg 0x%.2x\n", __func__, reg);
+		goto out;
+	}
 
 	tmp &= ~mask;
 	tmp |= data & mask;
 
-	return bq2589x_write_byte(bq, reg, tmp);
+	ret = __bq2589x_write_byte(bq, reg, tmp);
+	if (ret)
+		pr_err("%s: failed to write reg 0x%.2x\n", __func__, reg);
+
+out:
+	mutex_unlock(&bq->i2c_rw_lock);
+	return ret;
 }
 
 #if 0
@@ -183,7 +217,7 @@ static enum bq2589x_vbus_type bq2589x_get_vbus_type(struct bq2589x *bq)
 	u8 val = 0;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_0B);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_0B, &val);
 	pr_err("%s: zsa get charger type start ret: %d\n", __func__, ret);
 	if (ret < 0)
 		return 0;
@@ -314,7 +348,7 @@ int bq2589x_adc_start(struct bq2589x *bq, bool oneshot)
 	u8 val;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_02);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_02, &val);
 	if (ret < 0) {
 		pr_err("%s failed to read register 0x02:%d\n", __func__, ret);
 		return ret;
@@ -344,7 +378,7 @@ int bq2589x_adc_read_battery_volt(struct bq2589x *bq)
 	int volt;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_0E);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_0E, &val);
 	if (ret < 0) {
 		pr_err("read battery voltage failed: %d\n", ret);
 		return ret;
@@ -361,7 +395,7 @@ int bq2589x_adc_read_sys_volt(struct bq2589x *bq)
 	int volt;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_0F);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_0F, &val);
 	if (ret < 0) {
 		pr_err("read system voltage failed: %d\n", ret);
 		return ret;
@@ -378,7 +412,7 @@ int bq2589x_adc_read_vbus_volt(struct bq2589x *bq)
 	int volt;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_11);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_11, &val);
 	if (ret < 0) {
 		pr_err("read vbus voltage failed: %d\n", ret);
 		return ret;
@@ -395,7 +429,7 @@ int bq2589x_adc_read_temperature(struct bq2589x *bq)
 	int temp;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_10);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_10, &val);
 	if (ret < 0) {
 		pr_err("read temperature failed: %d\n", ret);
 		return ret;
@@ -412,7 +446,7 @@ int bq2589x_adc_read_charge_current(struct bq2589x *bq)
 	int volt;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_12);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_12, &val);
 	if (ret < 0) {
 		pr_err("read charge current failed: %d\n", ret);
 		return ret;
@@ -441,7 +475,7 @@ int bq2589x_get_charge_current(struct bq2589x *bq)
 	u8 val;
 	int ret = 0;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_04);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_04, &val);
 	if (ret < 0) {
 		pr_err("%s Failed to read register 0x00:%d\n", __func__, ret);
 		return ret;
@@ -497,7 +531,7 @@ int bq2589x_get_chargevoltage(struct bq2589x *bq)
 	u8 val;
 	int ret = 0;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_06);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_06, &val);
 	if (ret < 0) {
 		pr_err("%s Failed to read register 0x00:%d\n", __func__, ret);
 		return ret;
@@ -546,7 +580,7 @@ int bq2589x_get_input_current_limit(struct bq2589x *bq)
 	u8 val;
 	int ret = 0;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_00);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_00, &val);
 	if (ret < 0) {
 		pr_err("%s Failed to read register 0x00:%d\n", __func__, ret);
 		return ret;
@@ -585,7 +619,7 @@ u8 bq2589x_get_charging_status(struct bq2589x *bq)
 	if (!bq)
 		return POWER_SUPPLY_STATUS_UNKNOWN;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_0B);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_0B, &val);
 	if (ret < 0) {
 		pr_err("%s Failed to read register 0x0b:%d\n", __func__, ret);
 		return POWER_SUPPLY_STATUS_UNKNOWN;
@@ -675,14 +709,14 @@ static int bq2589x_is_dpdm_done(struct bq2589x *bq,int *done)
 
 //modify by HTH-209427/HTH-209841 at 2022/05/12 begin
 	if (bq->part_no == SC89890H) {
-		ret = bq2589x_read_byte(bq, &data, BQ2589X_REG_0B);
+		ret = bq2589x_read_byte(bq, BQ2589X_REG_0B, &data);
 		if (data & BQ2589X_PG_STAT_MASK) {
 			*done = 0;
 		} else {
 			*done = 1;
 		}
 	} else {
-		ret = bq2589x_read_byte(bq, &data, BQ2589X_REG_02);
+		ret = bq2589x_read_byte(bq, BQ2589X_REG_02, &data);
 		//pr_err("%s data(0x%x)\n", __func__, data);
 		data &= (BQ2589X_FORCE_DPDM << BQ2589X_FORCE_DPDM_SHIFT);
 		*done = (data >> BQ2589X_FORCE_DPDM_SHIFT);
@@ -699,7 +733,7 @@ int bq2589x_force_dpdm(struct bq2589x *bq)
 
 //modify by HTH-209427/HTH-209841/HTH-234945/HTH-234948 at 2022/06/08 begin
 	if (bq->part_no == SC89890H && bq->vbus_type == BQ2589X_VBUS_MAXC) {
-		bq2589x_read_byte(bq, &data, BQ2589X_REG_0B);
+		bq2589x_read_byte(bq, BQ2589X_REG_0B, &data);
 		bq_dbg(PR_OEM, "bq2589x_force_dpdm 0x0B = 0x%02x\n",data);
 		if ((data & 0xE0) == 0x80) {
 			bq2589x_write_byte(bq, BQ2589X_REG_01, 0x45);
@@ -769,7 +803,7 @@ int bq2589x_get_hiz_mode(struct bq2589x *bq, u8 *state)
 	u8 val;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_00);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_00, &val);
 	if (ret)
 		return ret;
 
@@ -812,7 +846,7 @@ int bq2589x_pumpx_increase_volt_done(struct bq2589x *bq)
 	u8 val;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_09);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_09, &val);
 	if (ret)
 		return ret;
 
@@ -840,7 +874,7 @@ int bq2589x_pumpx_decrease_volt_done(struct bq2589x *bq)
 	u8 val;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_09);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_09, &val);
 	if (ret)
 		return ret;
 
@@ -869,7 +903,7 @@ static int bq2589x_check_force_ico_done(struct bq2589x *bq)
 	u8 val;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_14);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_14, &val);
 	if (ret)
 		return ret;
 
@@ -950,7 +984,7 @@ static int bq2589x_read_idpm_limit(struct bq2589x *bq)
 	int curr;
 	int ret;
 
-	ret = bq2589x_read_byte(bq, &val, BQ2589X_REG_13);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_13, &val);
 	if (ret < 0) {
 		pr_err("read vbus voltage failed: %d\n", ret);
 		return ret;
@@ -966,7 +1000,7 @@ bool bq2589x_is_charge_done(void)
 	int ret;
 	u8 val;
 
-	ret = bq2589x_read_byte(g_bq, &val, BQ2589X_REG_0B);
+	ret = bq2589x_read_byte(g_bq, BQ2589X_REG_0B, &val);
 	if (ret < 0) {
 		pr_err("%s: read REG0B failed: %d\n", __func__, ret);
 		return false;
@@ -987,7 +1021,7 @@ static void bq2589x_dump_regs(struct bq2589x *bq)
 
 	bq_dbg(PR_OEM, "bq2589x_dump_regs:\n");
 	for (addr = 0x0; addr <= 0x14; addr++) {
-		ret = bq2589x_read_byte(bq, &val, addr);
+		ret = bq2589x_read_byte(bq, addr, &val);
 		if (ret == 0)
 			bq_dbg(PR_OEM, "Reg[%.2x] = 0x%.2x\n", addr, val);
 	}
@@ -1067,7 +1101,7 @@ static int bq2589x_charge_status(struct bq2589x *bq)
 {
 	u8 val = 0;
 
-	bq2589x_read_byte(bq, &val, BQ2589X_REG_0B);
+	bq2589x_read_byte(bq, BQ2589X_REG_0B, &val);
 	bq_dbg(PR_OEM, "get charge status: 0x%x\n", val);
 
 	val &= BQ2589X_CHRG_STAT_MASK;
@@ -1246,7 +1280,7 @@ static ssize_t bq2589x_show_registers(struct device *dev,
 
 	idx = snprintf(buf, PAGE_SIZE, "%s:\n", "Charger 1");
 	for (addr = 0x0; addr <= 0x14; addr++) {
-		ret = bq2589x_read_byte(g_bq, &val, addr);
+		ret = bq2589x_read_byte(g_bq, addr, &val);
 		if (ret == 0) {
 			len = snprintf(tmpbuf, PAGE_SIZE - idx, "Reg[0x%.2x] = 0x%.2x\n", addr, val);
 			memcpy(&buf[idx], tmpbuf, len);
@@ -1367,7 +1401,7 @@ static int bq2589x_detect_device(struct bq2589x *bq)
 	int ret;
 	u8 data;
 
-	ret = bq2589x_read_byte(bq, &data, BQ2589X_REG_14);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_14, &data);
 	if (ret == 0) {
 		bq->part_no = (data & BQ2589X_PN_MASK) >> BQ2589X_PN_SHIFT;
 		bq->revision = (data & BQ2589X_DEV_REV_MASK) >> BQ2589X_DEV_REV_SHIFT;
@@ -1609,7 +1643,7 @@ static void bq2589x_ico_workfunc(struct work_struct *work)
 		ico_issued = false;
 		ret = bq2589x_check_force_ico_done(bq);
 		if (ret) {/*ico done*/
-			ret = bq2589x_read_byte(bq, &status, BQ2589X_REG_13);
+			ret = bq2589x_read_byte(bq, BQ2589X_REG_13, &status);
 			if (ret == 0) {
 				idpm = ((status & BQ2589X_IDPM_LIM_MASK) >> BQ2589X_IDPM_LIM_SHIFT) * BQ2589X_IDPM_LIM_LSB + BQ2589X_IDPM_LIM_BASE;
 			}
@@ -1797,7 +1831,7 @@ static void bq2589x_monitor_workfunc(struct work_struct *work)
 		bq2589x_update_bits(bq, BQ2589X_REG_06, BQ2589X_VRECHG_MASK, BQ2589X_VRECHG_100MV << BQ2589X_VRECHG_SHIFT);
 	}
 
-	ret = bq2589x_read_byte(bq, &status, BQ2589X_REG_13);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_13, &status);
 	if (ret == 0 && (status & BQ2589X_VDPM_STAT_MASK))
 		bq_dbg(PR_OEM, "VINDPM occurred\n");
 	if (ret == 0 && (status & BQ2589X_IDPM_STAT_MASK))
@@ -2015,7 +2049,7 @@ static void bq2589x_charger_irq_workfunc(struct work_struct *work)
 	//pr_err("wsy irq_works bq2589x_usb_switch gpio_value=%d\n", gpio_get_value(bq->usb_switch1));
 
 	/* Read STATUS and FAULT registers */
-	ret = bq2589x_read_byte(bq, &status, BQ2589X_REG_0B);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_0B, &status);
 	if (ret)
 		return;
 	//bq2589x_dump_regs(bq);
@@ -2040,7 +2074,7 @@ static void bq2589x_charger_irq_workfunc(struct work_struct *work)
 		return;
 	}*/
 
-	ret = bq2589x_read_byte(bq, &fault, BQ2589X_REG_0C);
+	ret = bq2589x_read_byte(bq, BQ2589X_REG_0C, &fault);
 	if (ret)
 		return;
 
@@ -2049,7 +2083,7 @@ static void bq2589x_charger_irq_workfunc(struct work_struct *work)
 
 //modify by HTH-234945/HTH-234948 at 2022/06/08 begin
 	if (bq->part_no == SC89890H) {
-		ret = bq2589x_read_byte(bq, &vbus_status, BQ2589X_REG_11);
+		ret = bq2589x_read_byte(bq, BQ2589X_REG_11, &vbus_status);
 		if (ret)
 			return;
 
@@ -2496,13 +2530,13 @@ static int bq2589x_charger_probe(struct i2c_client *client,
 	if (irqn < 0) {
 		pr_err("%s: %d gpio_to_irq failed\n", __func__, irqn);
 		ret = irqn;
-		goto err_free;
+		goto err_gpio;
 	}
 	client->irq = irqn;
 
 	ret = bq2589x_psy_register(bq);
 	if (ret)
-		goto err_free;
+		goto err_gpio;
 
 	INIT_WORK(&bq->irq_work, bq2589x_charger_irq_workfunc);
 	INIT_WORK(&bq->adapter_in_work, bq2589x_adapter_in_workfunc);
@@ -2558,24 +2592,18 @@ static int bq2589x_charger_probe(struct i2c_client *client,
 	vote(bq->usb_icl_votable, PROFILE_CHG_VOTER, true, CHG_ICL_CURR_MAX);
 	vote(bq->chg_dis_votable, "BMS_FC_VOTER", false, 0);
 
-	ret = sysfs_create_group(&bq->dev->kobj, &bq2589x_attr_group);
-	if (ret) {
-		pr_err("failed to register sysfs. err: %d\n", ret);
-		goto err_irq;
-	}
-
 //modify by HTH-209427/HTH-209841 at 2022/05/12 begin
-	pe.enable = false;//PE adjuested to the front of the interrupt
+	pe.enable = false; //PE adjuested to the front of the interrupt
 //modify by HTH-209427/HTH-209841 at 2022/05/12 end
 	ret = request_irq(client->irq, bq2589x_charger_interrupt, IRQF_TRIGGER_FALLING | IRQF_ONESHOT, "bq2589x_charger1_irq", bq);
 	if (ret) {
 		pr_err("%s: Request IRQ %d failed: %d\n", __func__, client->irq, ret);
-		goto err_irq;
+		goto err_work;
 	} else {
 		bq_dbg(PR_OEM, "%s: irq=%d\n", __func__, client->irq);
 	}
-
 	//schedule_work(&bq->irq_work); // 2020.09.15 change for zsa in case of adapter has been in when power off
+	enable_irq_wake(irqn);
 
 #if defined(CONFIG_TCPC_RT1711H)
 	bq->pd_nb.notifier_call = pd_tcp_notifier_call;
@@ -2587,16 +2615,26 @@ static int bq2589x_charger_probe(struct i2c_client *client,
 	}
 #endif
 
-	enable_irq_wake(irqn);
-	schedule_delayed_work(&bq->time_delay_work, msecs_to_jiffies(4000));
+	ret = sysfs_create_group(&bq->dev->kobj, &bq2589x_attr_group);
+	if (ret) {
+		pr_err("failed to register sysfs. err: %d\n", ret);
+		goto err_sysfs;
+	}
 
+	schedule_delayed_work(&bq->time_delay_work, msecs_to_jiffies(4000));
 	pr_info("probe done\n");
 	return 0;
 
+err_sysfs:
 #if defined(CONFIG_TCPC_RT1711H)
+	unregister_tcp_dev_notifier(bq->tcpc_dev, &bq->pd_nb, TCP_NOTIFY_TYPE_ALL);
 err_get_tcpc_dev:
 #endif
-err_irq:
+	if (bq->client->irq > 0) {
+		disable_irq_wake(irqn);
+		free_irq(bq->client->irq, bq);
+	}
+err_work:
 	cancel_work_sync(&bq->irq_work);
 	cancel_work_sync(&bq->adapter_in_work);
 	cancel_work_sync(&bq->adapter_out_work);
@@ -2630,14 +2668,17 @@ destroy_votable:
 		destroy_votable(bq->chgctrl_votable);
 		bq->chgctrl_votable = NULL;
 	}*/
+err_gpio:
+	if (bq->irq_gpio)
+		gpio_free(bq->irq_gpio);
 err_free:
 	power_supply_put(bq->batt_psy);
 	power_supply_put(bq->bms_psy);
+	g_bq = NULL;
 err_dev:
 	mutex_destroy(&bq->i2c_rw_lock);
 	mutex_destroy(&bq->usb_switch_lock);
-	g_bq = NULL;
-	devm_kfree(&client->dev, bq);
+	//devm_kfree(&client->dev, bq);
 	pr_err("probe fail\n");
 	return ret;
 }
@@ -2646,14 +2687,20 @@ static void bq2589x_charger_shutdown(struct i2c_client *client)
 {
 	struct bq2589x *bq = i2c_get_clientdata(client);
 
-	bq2589x_disable_otg(bq);
+	if (!bq)
+		return;
 
+	bq2589x_disable_otg(bq);
 	bq2589x_exit_hiz_mode(bq);
 	bq2589x_adc_stop(bq);
 	bq2589x_psy_unregister(bq);
 	msleep(2);
 
-	sysfs_remove_group(&bq->dev->kobj, &bq2589x_attr_group);
+	if (bq->client->irq > 0) {
+		//disable_irq(bq->client->irq);
+		disable_irq_wake(bq->client->irq);
+		free_irq(bq->client->irq, bq);
+	}
 	cancel_work_sync(&bq->irq_work);
 	cancel_work_sync(&bq->adapter_in_work);
 	cancel_work_sync(&bq->adapter_out_work);
@@ -2666,19 +2713,15 @@ static void bq2589x_charger_shutdown(struct i2c_client *client)
 	cancel_delayed_work_sync(&bq->pe_volt_tune_work);
 	cancel_delayed_work_sync(&bq->time_delay_work);
 	//cancel_delayed_work_sync(&bq->period_work);
-	if (bq->client->irq) {
-		disable_irq(bq->client->irq);
-		free_irq(bq->client->irq, bq);
+	sysfs_remove_group(&bq->dev->kobj, &bq2589x_attr_group);
+	if (bq->irq_gpio)
 		gpio_free(bq->irq_gpio);
-	}
-	g_bq = NULL;
 }
 
 static struct of_device_id bq2589x_charger_match_table[] = {
 	{.compatible = "ti,bq2589x-1",},
 	{},
 };
-
 
 static const struct i2c_device_id bq2589x_charger_id[] = {
 	{"bq2589x-1", BQ25890},
